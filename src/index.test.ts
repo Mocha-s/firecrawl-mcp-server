@@ -1,16 +1,3 @@
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import FirecrawlApp from '@mendable/firecrawl-js';
-import type {
-  SearchResponse,
-  BatchScrapeResponse,
-  BatchScrapeStatusResponse,
-  CrawlResponse,
-  CrawlStatusResponse,
-  ScrapeResponse,
-  FirecrawlDocument,
-  SearchParams,
-} from '@mendable/firecrawl-js';
 import {
   describe,
   expect,
@@ -18,371 +5,337 @@ import {
   test,
   beforeEach,
   afterEach,
+  beforeAll,
 } from '@jest/globals';
-import { mock, MockProxy } from 'jest-mock-extended';
+import { writeFile, mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
-// Mock FirecrawlApp
-jest.mock('@mendable/firecrawl-js');
+// ESM mock — must be set up BEFORE any dynamic import of code that pulls in
+// '@mendable/firecrawl-js'.
+const fc = {
+  scrape: jest.fn(),
+  map: jest.fn(),
+  search: jest.fn(),
+  startCrawl: jest.fn(),
+  getCrawlStatus: jest.fn(),
+  crawl: jest.fn(),
+  batchScrape: jest.fn(),
+  getBatchScrapeStatus: jest.fn(),
+  extract: jest.fn(),
+  parse: jest.fn(),
+  deepResearch: jest.fn(),
+  generateLLMsText: jest.fn(),
+};
 
-// Test interfaces
-interface RequestParams {
-  method: string;
-  params: {
-    name: string;
-    arguments?: Record<string, any>;
-  };
-}
+jest.unstable_mockModule('@mendable/firecrawl-js', () => ({
+  __esModule: true,
+  default: jest.fn().mockImplementation(() => ({
+    scrape: fc.scrape,
+    map: fc.map,
+    search: fc.search,
+    startCrawl: fc.startCrawl,
+    getCrawlStatus: fc.getCrawlStatus,
+    crawl: fc.crawl,
+    batchScrape: fc.batchScrape,
+    getBatchScrapeStatus: fc.getBatchScrapeStatus,
+    extract: fc.extract,
+    parse: fc.parse,
+    v1: {
+      deepResearch: fc.deepResearch,
+      generateLLMsText: fc.generateLLMsText,
+    },
+  })),
+}));
 
-interface BatchScrapeArgs {
-  urls: string[];
-  options?: {
-    formats?: string[];
-    [key: string]: any;
-  };
-}
+const { FirecrawlToolsIntegration } = await import(
+  './firecrawl-tools-integration.js'
+);
 
-interface StatusCheckArgs {
-  id: string;
-}
+describe('FirecrawlToolsIntegration', () => {
+  let integration: InstanceType<typeof FirecrawlToolsIntegration>;
 
-interface SearchArgs {
-  query: string;
-  scrapeOptions?: {
-    formats?: string[];
-    onlyMainContent?: boolean;
-  };
-}
-
-interface ScrapeArgs {
-  url: string;
-  formats?: string[];
-  onlyMainContent?: boolean;
-}
-
-interface CrawlArgs {
-  url: string;
-  maxDepth?: number;
-  limit?: number;
-}
-
-// Mock client interface
-interface MockFirecrawlClient {
-  scrapeUrl(url: string, options?: any): Promise<ScrapeResponse>;
-  search(query: string, params?: SearchParams): Promise<SearchResponse>;
-  asyncBatchScrapeUrls(
-    urls: string[],
-    options?: any
-  ): Promise<BatchScrapeResponse>;
-  checkBatchScrapeStatus(id: string): Promise<BatchScrapeStatusResponse>;
-  asyncCrawlUrl(url: string, options?: any): Promise<CrawlResponse>;
-  checkCrawlStatus(id: string): Promise<CrawlStatusResponse>;
-  mapUrl(url: string, options?: any): Promise<{ links: string[] }>;
-}
-
-describe('Firecrawl Tool Tests', () => {
-  let mockClient: MockProxy<MockFirecrawlClient>;
-  let requestHandler: (request: RequestParams) => Promise<any>;
+  beforeAll(() => {
+    process.env.FIRECRAWL_API_KEY = 'test-key';
+    process.env.FIRECRAWL_API_URL = 'http://localhost:3002';
+  });
 
   beforeEach(() => {
-    jest.clearAllMocks();
-    mockClient = mock<MockFirecrawlClient>();
-
-    // Set up mock implementations
-    const mockInstance = new FirecrawlApp({ apiKey: 'test' });
-    Object.assign(mockInstance, mockClient);
-
-    // Create request handler
-    requestHandler = async (request: RequestParams) => {
-      const { name, arguments: args } = request.params;
-      if (!args) {
-        throw new Error('No arguments provided');
-      }
-      return handleRequest(name, args, mockClient);
-    };
+    Object.values(fc).forEach((m) => m.mockReset());
+    integration = new FirecrawlToolsIntegration();
   });
 
   afterEach(() => {
     jest.clearAllMocks();
   });
 
-  // Test scrape functionality
-  test('should handle scrape request', async () => {
-    const url = 'https://example.com';
-    const options = { formats: ['markdown'] };
+  // --- scrape ---------------------------------------------------------------
 
-    const mockResponse: ScrapeResponse = {
-      success: true,
-      markdown: '# Test Content',
-      html: undefined,
-      rawHtml: undefined,
+  test('firecrawl_scrape passes basic args through', async () => {
+    fc.scrape.mockResolvedValueOnce({ markdown: '# Hi', metadata: {} } as never);
+
+    const res = await integration.executeToolCall('firecrawl_scrape', {
       url: 'https://example.com',
-      actions: undefined as never,
-    };
-
-    mockClient.scrapeUrl.mockResolvedValueOnce(mockResponse);
-
-    const response = await requestHandler({
-      method: 'call_tool',
-      params: {
-        name: 'firecrawl_scrape',
-        arguments: { url, ...options },
-      },
-    });
-
-    expect(response).toEqual({
-      content: [{ type: 'text', text: '# Test Content' }],
-      isError: false,
-    });
-    expect(mockClient.scrapeUrl).toHaveBeenCalledWith(url, {
-      formats: ['markdown'],
-      url,
-    });
-  });
-
-  // Test scrape with maxAge parameter
-  test('should handle scrape request with maxAge parameter', async () => {
-    const url = 'https://example.com';
-    const options = { formats: ['markdown'], maxAge: 3600000 };
-
-    const mockResponse: ScrapeResponse = {
-      success: true,
-      markdown: '# Test Content',
-      html: undefined,
-      rawHtml: undefined,
-      url: 'https://example.com',
-      actions: undefined as never,
-    };
-
-    mockClient.scrapeUrl.mockResolvedValueOnce(mockResponse);
-
-    const response = await requestHandler({
-      method: 'call_tool',
-      params: {
-        name: 'firecrawl_scrape',
-        arguments: { url, ...options },
-      },
-    });
-
-    expect(response).toEqual({
-      content: [{ type: 'text', text: '# Test Content' }],
-      isError: false,
-    });
-    expect(mockClient.scrapeUrl).toHaveBeenCalledWith(url, {
       formats: ['markdown'],
       maxAge: 3600000,
-      url,
     });
+
+    expect(res.success).toBe(true);
+    expect(fc.scrape).toHaveBeenCalledTimes(1);
+    const [url, options] = fc.scrape.mock.calls[0] as [string, any];
+    expect(url).toBe('https://example.com');
+    expect(options.formats).toEqual(['markdown']);
+    expect(options.maxAge).toBe(3600000);
+    expect(options.origin).toBe('mcp-mocha');
   });
 
-  // Test batch scrape functionality
-  test('should handle batch scrape request', async () => {
-    const urls = ['https://example.com'];
-    const options = { formats: ['markdown'] };
+  test('firecrawl_scrape expands string formats with sibling options', async () => {
+    fc.scrape.mockResolvedValueOnce({ markdown: '' } as never);
 
-    mockClient.asyncBatchScrapeUrls.mockResolvedValueOnce({
-      success: true,
-      id: 'test-batch-id',
+    await integration.executeToolCall('firecrawl_scrape', {
+      url: 'https://example.com',
+      formats: ['json', 'markdown'],
+      jsonOptions: { prompt: 'Extract title', schema: { type: 'object' } },
     });
 
-    const response = await requestHandler({
-      method: 'call_tool',
-      params: {
-        name: 'firecrawl_batch_scrape',
-        arguments: { urls, options },
-      },
-    });
+    const options = fc.scrape.mock.calls[0]![1] as any;
+    expect(options.formats).toEqual([
+      { type: 'json', prompt: 'Extract title', schema: { type: 'object' } },
+      'markdown',
+    ]);
+    expect(options.jsonOptions).toBeUndefined();
+  });
 
-    expect(response.content[0].text).toContain(
-      'Batch operation queued with ID: batch_'
+  test('firecrawl_scrape rejects invalid args via zod', async () => {
+    const res = await integration.executeToolCall('firecrawl_scrape', {
+      url: 'not-a-url',
+    });
+    expect(res.success).toBe(false);
+    expect(res.error.message).toMatch(/Invalid arguments/);
+    expect(fc.scrape).not.toHaveBeenCalled();
+  });
+
+  test('firecrawl_scrape surfaces SDK errors', async () => {
+    fc.scrape.mockRejectedValueOnce(new Error('boom') as never);
+    const res = await integration.executeToolCall('firecrawl_scrape', {
+      url: 'https://example.com',
+    });
+    expect(res.success).toBe(false);
+    expect(res.error.message).toBe('boom');
+  });
+
+  // --- map ------------------------------------------------------------------
+
+  test('firecrawl_map forwards sitemap option', async () => {
+    fc.map.mockResolvedValueOnce({ links: [] } as never);
+    await integration.executeToolCall('firecrawl_map', {
+      url: 'https://example.com',
+      sitemap: 'only',
+      includeSubdomains: true,
+    });
+    const [, options] = fc.map.mock.calls[0] as [string, any];
+    expect(options.sitemap).toBe('only');
+    expect(options.includeSubdomains).toBe(true);
+  });
+
+  // --- crawl ----------------------------------------------------------------
+
+  test('firecrawl_crawl uses startCrawl and forwards v2 params', async () => {
+    fc.startCrawl.mockResolvedValueOnce({ id: 'job-123' } as never);
+    await integration.executeToolCall('firecrawl_crawl', {
+      url: 'https://example.com',
+      prompt: 'docs only',
+      maxDiscoveryDepth: 3,
+      crawlEntireDomain: true,
+      sitemap: 'include',
+      delay: 200,
+      maxConcurrency: 4,
+      scrapeOptions: { formats: ['markdown'], onlyMainContent: true },
+    });
+    const [url, options] = fc.startCrawl.mock.calls[0] as [string, any];
+    expect(url).toBe('https://example.com');
+    expect(options.prompt).toBe('docs only');
+    expect(options.maxDiscoveryDepth).toBe(3);
+    expect(options.crawlEntireDomain).toBe(true);
+    expect(options.sitemap).toBe('include');
+    expect(options.delay).toBe(200);
+    expect(options.maxConcurrency).toBe(4);
+    expect(options.scrapeOptions.formats).toEqual(['markdown']);
+  });
+
+  test('firecrawl_check_crawl_status calls getCrawlStatus', async () => {
+    fc.getCrawlStatus.mockResolvedValueOnce({ status: 'completed' } as never);
+    const res = await integration.executeToolCall(
+      'firecrawl_check_crawl_status',
+      { id: 'job-1' }
     );
-    expect(mockClient.asyncBatchScrapeUrls).toHaveBeenCalledWith(urls, options);
+    expect(res.success).toBe(true);
+    expect(fc.getCrawlStatus).toHaveBeenCalledWith('job-1');
   });
 
-  // Test search functionality
-  test('should handle search request', async () => {
-    const query = 'test query';
-    const scrapeOptions = { formats: ['markdown'] };
+  // --- batch ----------------------------------------------------------------
 
-    const mockSearchResponse: SearchResponse = {
-      success: true,
-      data: [
-        {
-          url: 'https://example.com',
-          title: 'Test Page',
-          description: 'Test Description',
-          markdown: '# Test Content',
-          actions: undefined as never,
-        },
-      ],
-    };
-
-    mockClient.search.mockResolvedValueOnce(mockSearchResponse);
-
-    const response = await requestHandler({
-      method: 'call_tool',
-      params: {
-        name: 'firecrawl_search',
-        arguments: { query, scrapeOptions },
-      },
+  test('firecrawl_batch_scrape returns job id', async () => {
+    fc.batchScrape.mockResolvedValueOnce({ id: 'batch-1' } as never);
+    const res = await integration.executeToolCall('firecrawl_batch_scrape', {
+      urls: ['https://a.com', 'https://b.com'],
+      scrapeOptions: { formats: ['markdown'] },
     });
-
-    expect(response.isError).toBe(false);
-    expect(response.content[0].text).toContain('Test Page');
-    expect(mockClient.search).toHaveBeenCalledWith(query, scrapeOptions);
+    expect(res.success).toBe(true);
+    expect(res.data.id).toBe('batch-1');
+    const [urls, options] = fc.batchScrape.mock.calls[0] as [string[], any];
+    expect(urls).toEqual(['https://a.com', 'https://b.com']);
+    expect(options.formats).toEqual(['markdown']);
+    expect(options.pollWaitUntil).toBe(false);
   });
 
-  // Test crawl functionality
-  test('should handle crawl request', async () => {
-    const url = 'https://example.com';
-    const options = { maxDepth: 2 };
-
-    mockClient.asyncCrawlUrl.mockResolvedValueOnce({
-      success: true,
-      id: 'test-crawl-id',
+  test('firecrawl_check_batch_status calls getBatchScrapeStatus', async () => {
+    fc.getBatchScrapeStatus.mockResolvedValueOnce({
+      status: 'completed',
+    } as never);
+    await integration.executeToolCall('firecrawl_check_batch_status', {
+      id: 'batch-1',
     });
+    expect(fc.getBatchScrapeStatus).toHaveBeenCalledWith('batch-1');
+  });
 
-    const response = await requestHandler({
-      method: 'call_tool',
-      params: {
-        name: 'firecrawl_crawl',
-        arguments: { url, ...options },
-      },
+  // --- crawl_params_preview -------------------------------------------------
+
+  test('firecrawl_crawl_params_preview hits /v2/crawl/params-preview', async () => {
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ derived: { limit: 50 } }), {
+          status: 200,
+        })
+      );
+
+    const res = await integration.executeToolCall(
+      'firecrawl_crawl_params_preview',
+      { url: 'https://docs.example.com', prompt: 'extract docs' }
+    );
+
+    expect(res.success).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [endpoint, init] = fetchMock.mock.calls[0] as [string, any];
+    expect(endpoint).toBe('http://localhost:3002/v2/crawl/params-preview');
+    expect(init.method).toBe('POST');
+    const body = JSON.parse(init.body as string);
+    expect(body.url).toBe('https://docs.example.com');
+    expect(body.prompt).toBe('extract docs');
+    fetchMock.mockRestore();
+  });
+
+  // --- search ---------------------------------------------------------------
+
+  test('firecrawl_search builds site: operators from includeDomains', async () => {
+    fc.search.mockResolvedValueOnce({ data: [] } as never);
+    await integration.executeToolCall('firecrawl_search', {
+      query: 'hello',
+      includeDomains: ['example.com', 'docs.example.com'],
     });
+    const [query] = fc.search.mock.calls[0] as [string, any];
+    expect(query).toBe('hello (site:example.com OR site:docs.example.com)');
+  });
 
-    expect(response.isError).toBe(false);
-    expect(response.content[0].text).toContain('test-crawl-id');
-    expect(mockClient.asyncCrawlUrl).toHaveBeenCalledWith(url, {
+  test('firecrawl_search normalizes string sources to {type}', async () => {
+    fc.search.mockResolvedValueOnce({ data: [] } as never);
+    await integration.executeToolCall('firecrawl_search', {
+      query: 'hello',
+      sources: ['web', 'news'],
+    });
+    const options = fc.search.mock.calls[0]![1] as any;
+    expect(options.sources).toEqual([{ type: 'web' }, { type: 'news' }]);
+  });
+
+  // --- extract --------------------------------------------------------------
+
+  test('firecrawl_extract forwards advanced flags', async () => {
+    fc.extract.mockResolvedValueOnce({ data: {} } as never);
+    await integration.executeToolCall('firecrawl_extract', {
+      urls: ['https://a.com'],
+      prompt: 'pull title',
+      enableWebSearch: true,
+      includeSubdomains: true,
+    });
+    const body = fc.extract.mock.calls[0]![0] as any;
+    expect(body.urls).toEqual(['https://a.com']);
+    expect(body.enableWebSearch).toBe(true);
+    expect(body.includeSubdomains).toBe(true);
+  });
+
+  // --- deep research / llmstxt (v1 namespace) -------------------------------
+
+  test('firecrawl_deep_research routes through client.v1.deepResearch', async () => {
+    fc.deepResearch.mockResolvedValueOnce({
+      data: { finalAnalysis: 'ok' },
+    } as never);
+    await integration.executeToolCall('firecrawl_deep_research', {
+      query: 'EVs vs gas',
       maxDepth: 2,
-      url,
+      timeLimit: 60,
+      maxUrls: 10,
     });
+    expect(fc.deepResearch).toHaveBeenCalledTimes(1);
+    const [query, params] = fc.deepResearch.mock.calls[0] as [string, any];
+    expect(query).toBe('EVs vs gas');
+    expect(params).toEqual({ maxDepth: 2, timeLimit: 60, maxUrls: 10 });
   });
 
-  // Test error handling
-  test('should handle API errors', async () => {
-    const url = 'https://example.com';
-
-    mockClient.scrapeUrl.mockRejectedValueOnce(new Error('API Error'));
-
-    const response = await requestHandler({
-      method: 'call_tool',
-      params: {
-        name: 'firecrawl_scrape',
-        arguments: { url },
-      },
+  test('firecrawl_generate_llmstxt routes through client.v1.generateLLMsText', async () => {
+    fc.generateLLMsText.mockResolvedValueOnce({
+      data: { llmstxt: 'x' },
+    } as never);
+    await integration.executeToolCall('firecrawl_generate_llmstxt', {
+      url: 'https://example.com',
+      maxUrls: 20,
+      showFullText: true,
     });
-
-    expect(response.isError).toBe(true);
-    expect(response.content[0].text).toContain('API Error');
+    expect(fc.generateLLMsText).toHaveBeenCalledTimes(1);
+    const [url, params] = fc.generateLLMsText.mock.calls[0] as [string, any];
+    expect(url).toBe('https://example.com');
+    expect(params).toEqual({ maxUrls: 20, showFullText: true });
   });
 
-  // Test rate limiting
-  test('should handle rate limits', async () => {
-    const url = 'https://example.com';
+  // --- parse ----------------------------------------------------------------
 
-    // Mock rate limit error
-    mockClient.scrapeUrl.mockRejectedValueOnce(
-      new Error('rate limit exceeded')
-    );
+  test('firecrawl_parse reads file and forwards to SDK parse()', async () => {
+    fc.parse.mockResolvedValueOnce({ markdown: '# parsed' } as never);
+    const dir = await mkdtemp(path.join(tmpdir(), 'fc-parse-'));
+    const file = path.join(dir, 'test.html');
+    await writeFile(file, '<html><body>hi</body></html>', 'utf8');
 
-    const response = await requestHandler({
-      method: 'call_tool',
-      params: {
-        name: 'firecrawl_scrape',
-        arguments: { url },
-      },
+    const res = await integration.executeToolCall('firecrawl_parse', {
+      filePath: file,
+      formats: ['markdown'],
     });
 
-    expect(response.isError).toBe(true);
-    expect(response.content[0].text).toContain('rate limit exceeded');
+    expect(res.success).toBe(true);
+    expect(fc.parse).toHaveBeenCalledTimes(1);
+    const [filePayload, options] = fc.parse.mock.calls[0] as [any, any];
+    expect(filePayload.filename).toBe('test.html');
+    expect(filePayload.contentType).toBe('text/html');
+    expect(Buffer.isBuffer(filePayload.data)).toBe(true);
+    expect(options.formats).toEqual(['markdown']);
+  });
+
+  test('firecrawl_parse fails fast if FIRECRAWL_API_URL is unset', async () => {
+    const oldUrl = process.env.FIRECRAWL_API_URL;
+    delete process.env.FIRECRAWL_API_URL;
+    integration = new FirecrawlToolsIntegration();
+    const res = await integration.executeToolCall('firecrawl_parse', {
+      filePath: '/tmp/whatever.pdf',
+    });
+    expect(res.success).toBe(false);
+    expect(res.error.message).toMatch(/FIRECRAWL_API_URL/);
+    process.env.FIRECRAWL_API_URL = oldUrl;
+  });
+
+  // --- unknown tool ---------------------------------------------------------
+
+  test('unknown tool returns error', async () => {
+    const res = await integration.executeToolCall('firecrawl_nope', {});
+    expect(res.success).toBe(false);
+    expect(res.error.message).toMatch(/Unknown tool/);
   });
 });
-
-// Helper function to simulate request handling
-async function handleRequest(
-  name: string,
-  args: any,
-  client: MockFirecrawlClient
-) {
-  try {
-    switch (name) {
-      case 'firecrawl_scrape': {
-        const response = await client.scrapeUrl(args.url, args);
-        if (!response.success) {
-          throw new Error(response.error || 'Scraping failed');
-        }
-        return {
-          content: [
-            { type: 'text', text: response.markdown || 'No content available' },
-          ],
-          isError: false,
-        };
-      }
-
-      case 'firecrawl_batch_scrape': {
-        const response = await client.asyncBatchScrapeUrls(
-          args.urls,
-          args.options
-        );
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Batch operation queued with ID: batch_1. Use firecrawl_check_batch_status to check progress.`,
-            },
-          ],
-          isError: false,
-        };
-      }
-
-      case 'firecrawl_search': {
-        const response = await client.search(args.query, args.scrapeOptions);
-        if (!response.success) {
-          throw new Error(response.error || 'Search failed');
-        }
-        const results = response.data
-          .map(
-            (result) =>
-              `URL: ${result.url}\nTitle: ${
-                result.title || 'No title'
-              }\nDescription: ${result.description || 'No description'}\n${
-                result.markdown ? `\nContent:\n${result.markdown}` : ''
-              }`
-          )
-          .join('\n\n');
-        return {
-          content: [{ type: 'text', text: results }],
-          isError: false,
-        };
-      }
-
-      case 'firecrawl_crawl': {
-        const response = await client.asyncCrawlUrl(args.url, args);
-        if (!response.success) {
-          throw new Error(response.error);
-        }
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Started crawl for ${args.url} with job ID: ${response.id}`,
-            },
-          ],
-          isError: false,
-        };
-      }
-
-      default:
-        throw new Error(`Unknown tool: ${name}`);
-    }
-  } catch (error) {
-    return {
-      content: [
-        {
-          type: 'text',
-          text: error instanceof Error ? error.message : String(error),
-        },
-      ],
-      isError: true,
-    };
-  }
-}

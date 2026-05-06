@@ -2,24 +2,14 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
   Tool,
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import Firecrawl from '@mendable/firecrawl-js';
 import { FirecrawlToolsIntegration } from './firecrawl-tools-integration.js';
 
-import express, { Request, Response, RequestHandler } from 'express';
 import dotenv from 'dotenv';
-import crypto from 'crypto';
-
-// Extend global type for Firecrawl
-declare global {
-  var firecrawlApp: Firecrawl | undefined;
-}
 
 dotenv.config();
 
@@ -989,181 +979,142 @@ Generate a standardized llms.txt (and optionally llms-full.txt) file for a given
   },
 };
 
-/**
- * Parameters for LLMs.txt generation operations.
- */
-interface GenerateLLMsTextParams {
-  /**
-   * Maximum number of URLs to process (1-100)
-   * @default 10
-   */
-  maxUrls?: number;
-  /**
-   * Whether to show the full LLMs-full.txt in the response
-   * @default false
-   */
-  showFullText?: boolean;
-  /**
-   * Experimental flag for streaming
-   */
-  __experimental_stream?: boolean;
+const PARSE_TOOL: Tool = {
+  name: 'firecrawl_parse',
+  description: `
+Parse a file from the local filesystem using a self-hosted Firecrawl API's /v2/parse endpoint.
+This is the fastest way to extract content from a document on disk — only available when the MCP is pointed at a self-hosted Firecrawl instance (FIRECRAWL_API_URL set).
+
+**Best for:** Extracting content from a local document (PDF, Word, Excel, HTML, etc.); pulling structured data out of a file with JSON format; converting binary documents into markdown.
+**Not recommended for:** Remote URLs (use firecrawl_scrape); multiple files at once (call parse multiple times); documents that require interactive actions, screenshots, or change tracking — those aren't supported by /v2/parse.
+**Common mistakes:** Passing a URL instead of a local file path; requesting an unsupported format (screenshot, branding, changeTracking); setting waitFor, location, mobile, or a non-basic/auto proxy — parse uploads reject those.
+
+**Supported file types:** .html, .htm, .xhtml, .pdf, .docx, .doc, .odt, .rtf, .xlsx, .xls
+**Supported formats:** markdown, html, rawHtml, links, summary, json, query
+
+**Usage Example (markdown from a local PDF):**
+\`\`\`json
+{
+  "name": "firecrawl_parse",
+  "arguments": {
+    "filePath": "/absolute/path/to/document.pdf",
+    "formats": ["markdown"],
+    "parsers": ["pdf"],
+    "pdfOptions": { "maxPages": 50 },
+    "onlyMainContent": true
+  }
 }
+\`\`\`
 
-/**
- * Response interface for LLMs.txt generation operations.
- */
-// interface GenerateLLMsTextResponse {
-//   success: boolean;
-//   id: string;
-// }
-
-/**
- * Status response interface for LLMs.txt generation operations.
- */
-// interface GenerateLLMsTextStatusResponse {
-//   success: boolean;
-//   data: {
-//     llmstxt: string;
-//     llmsfulltxt?: string;
-//   };
-//   status: 'processing' | 'completed' | 'failed';
-//   error?: string;
-//   expiresAt: string;
-// }
-
-interface StatusCheckOptions {
-  id: string;
+**Usage Example (structured JSON from a local HTML file):**
+\`\`\`json
+{
+  "name": "firecrawl_parse",
+  "arguments": {
+    "filePath": "./invoice.html",
+    "formats": ["json"],
+    "jsonOptions": {
+      "prompt": "Extract the invoice number, total, and line items",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "invoiceNumber": { "type": "string" },
+          "total": { "type": "number" }
+        }
+      }
+    }
+  }
 }
-
-interface SearchOptions {
-  query: string;
-  limit?: number;
-  lang?: string;
-  country?: string;
-  tbs?: string;
-  filter?: string;
-  location?: {
-    country?: string;
-    languages?: string[];
-  };
-  scrapeOptions?: {
-    formats?: string[];
-    onlyMainContent?: boolean;
-    waitFor?: number;
-    includeTags?: string[];
-    excludeTags?: string[];
-    timeout?: number;
-  };
-}
-
-// Add after other interfaces
-interface ExtractParams<T = any> {
-  prompt?: string;
-  systemPrompt?: string;
-  schema?: T | object;
-  allowExternalLinks?: boolean;
-  enableWebSearch?: boolean;
-  includeSubdomains?: boolean;
-  origin?: string;
-}
-
-interface ExtractArgs {
-  urls: string[];
-  prompt?: string;
-  systemPrompt?: string;
-  schema?: object;
-  allowExternalLinks?: boolean;
-  enableWebSearch?: boolean;
-  includeSubdomains?: boolean;
-  origin?: string;
-}
-
-interface ExtractResponse<T = any> {
-  success: boolean;
-  data: T;
-  error?: string;
-  warning?: string;
-  creditsUsed?: number;
-}
+\`\`\`
+**Returns:** A parsed document with markdown, html, links, summary, json, or query results depending on the requested formats.
+`,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      filePath: {
+        type: 'string',
+        description:
+          'Absolute or relative path to a local file to parse. Supported: .html, .htm, .xhtml, .pdf, .docx, .doc, .odt, .rtf, .xlsx, .xls',
+      },
+      contentType: {
+        type: 'string',
+        description:
+          'Optional MIME type override. If omitted, the type is inferred from the file extension.',
+      },
+      formats: {
+        type: 'array',
+        items: {
+          oneOf: [
+            {
+              type: 'string',
+              enum: [
+                'markdown',
+                'html',
+                'rawHtml',
+                'links',
+                'summary',
+                'json',
+                'query',
+              ],
+            },
+            { type: 'object' },
+          ],
+        },
+        description: 'Output formats. Same shapes as firecrawl_scrape, minus screenshot/branding/changeTracking.',
+      },
+      jsonOptions: {
+        type: 'object',
+        properties: {
+          prompt: { type: 'string' },
+          schema: { type: 'object' },
+        },
+      },
+      queryOptions: {
+        type: 'object',
+        properties: {
+          prompt: { type: 'string' },
+          mode: { type: 'string', enum: ['directQuote', 'freeform'] },
+        },
+      },
+      parsers: {
+        type: 'array',
+        items: {
+          oneOf: [
+            { type: 'string', enum: ['pdf'] },
+            { type: 'object' },
+          ],
+        },
+      },
+      pdfOptions: {
+        type: 'object',
+        properties: {
+          maxPages: { type: 'number', minimum: 1, maximum: 10000 },
+        },
+      },
+      onlyMainContent: { type: 'boolean' },
+      includeTags: { type: 'array', items: { type: 'string' } },
+      excludeTags: { type: 'array', items: { type: 'string' } },
+      removeBase64Images: { type: 'boolean' },
+      skipTlsVerification: { type: 'boolean' },
+      storeInCache: { type: 'boolean' },
+      zeroDataRetention: { type: 'boolean' },
+      maxAge: { type: 'number' },
+      proxy: { type: 'string', enum: ['basic', 'auto'] },
+    },
+    required: ['filePath'],
+  },
+};
 
 // Utility function to trim trailing whitespace from text responses
 function trimResponseText(text: string): string {
   return text.trim();
 }
 
-// Type guards
-function isScrapeOptions(
-  args: unknown
-): args is any & { url: string } {
-  return (
-    typeof args === 'object' &&
-    args !== null &&
-    'url' in args &&
-    typeof (args as { url: unknown }).url === 'string'
-  );
-}
-
-function isMapOptions(args: unknown): args is any & { url: string } {
-  return (
-    typeof args === 'object' &&
-    args !== null &&
-    'url' in args &&
-    typeof (args as { url: unknown }).url === 'string'
-  );
-}
-
-function isCrawlOptions(args: unknown): args is any & { url: string } {
-  return (
-    typeof args === 'object' &&
-    args !== null &&
-    'url' in args &&
-    typeof (args as { url: unknown }).url === 'string'
-  );
-}
-
-function isStatusCheckOptions(args: unknown): args is StatusCheckOptions {
-  return (
-    typeof args === 'object' &&
-    args !== null &&
-    'id' in args &&
-    typeof (args as { id: unknown }).id === 'string'
-  );
-}
-
-function isSearchOptions(args: unknown): args is SearchOptions {
-  return (
-    typeof args === 'object' &&
-    args !== null &&
-    'query' in args &&
-    typeof (args as { query: unknown }).query === 'string'
-  );
-}
-
-function isExtractOptions(args: unknown): args is ExtractArgs {
-  if (typeof args !== 'object' || args === null) return false;
-  const { urls } = args as { urls?: unknown };
-  return (
-    Array.isArray(urls) &&
-    urls.every((url): url is string => typeof url === 'string')
-  );
-}
-
-function isGenerateLLMsTextOptions(
-  args: unknown
-): args is { url: string } & Partial<GenerateLLMsTextParams> {
-  return (
-    typeof args === 'object' &&
-    args !== null &&
-    'url' in args &&
-    typeof (args as { url: unknown }).url === 'string'
-  );
-}
-
 // Server implementation
 const server = new Server(
   {
     name: 'firecrawl-mcp',
-    version: '1.7.0',
+    version: '1.13.0',
   },
   {
     capabilities: {
@@ -1191,30 +1142,34 @@ if (
   process.exit(1);
 }
 
-// Initialize Firecrawl client with optional API URL
+// firecrawl_parse only makes sense against a self-hosted Firecrawl instance.
+// /v2/parse is exposed by the open-source firecrawl API but not by the cloud
+// product, so register it only when CLOUD_SERVICE is not enabled AND a custom
+// FIRECRAWL_API_URL is configured.
+const PARSE_TOOL_ENABLED =
+  process.env.CLOUD_SERVICE !== 'true' && !!FIRECRAWL_API_URL;
 
-// Configuration for retries and monitoring
-const CONFIG = {
-  retry: {
-    maxAttempts: Number(process.env.FIRECRAWL_RETRY_MAX_ATTEMPTS) || 3,
-    initialDelay: Number(process.env.FIRECRAWL_RETRY_INITIAL_DELAY) || 1000,
-    maxDelay: Number(process.env.FIRECRAWL_RETRY_MAX_DELAY) || 10000,
-    backoffFactor: Number(process.env.FIRECRAWL_RETRY_BACKOFF_FACTOR) || 2,
-  },
-  credit: {
-    warningThreshold:
-      Number(process.env.FIRECRAWL_CREDIT_WARNING_THRESHOLD) || 1000,
-    criticalThreshold:
-      Number(process.env.FIRECRAWL_CREDIT_CRITICAL_THRESHOLD) || 100,
-  },
-};
-
-// Add utility function for delay
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function buildToolList(): Tool[] {
+  const tools: Tool[] = [
+    SCRAPE_TOOL,
+    MAP_TOOL,
+    CRAWL_TOOL,
+    CHECK_CRAWL_STATUS_TOOL,
+    BATCH_SCRAPE_TOOL,
+    CHECK_BATCH_STATUS_TOOL,
+    CRAWL_PARAMS_PREVIEW_TOOL,
+    SEARCH_TOOL,
+    EXTRACT_TOOL,
+    DEEP_RESEARCH_TOOL,
+    GENERATE_LLMSTXT_TOOL,
+  ];
+  if (PARSE_TOOL_ENABLED) tools.push(PARSE_TOOL);
+  return tools;
 }
 
-let isStdioTransport = false;
+// Initialize Firecrawl client with optional API URL
+
+const isStdioTransport = false;
 
 function safeLog(
   level:
@@ -1239,54 +1194,9 @@ function safeLog(
   }
 }
 
-// Add retry logic with exponential backoff
-async function withRetry<T>(
-  operation: () => Promise<T>,
-  context: string,
-  attempt = 1
-): Promise<T> {
-  try {
-    return await operation();
-  } catch (error) {
-    const isRateLimit =
-      error instanceof Error &&
-      (error.message.includes('rate limit') || error.message.includes('429'));
-
-    if (isRateLimit && attempt < CONFIG.retry.maxAttempts) {
-      const delayMs = Math.min(
-        CONFIG.retry.initialDelay *
-          Math.pow(CONFIG.retry.backoffFactor, attempt - 1),
-        CONFIG.retry.maxDelay
-      );
-
-      safeLog(
-        'warning',
-        `Rate limit hit for ${context}. Attempt ${attempt}/${CONFIG.retry.maxAttempts}. Retrying in ${delayMs}ms`
-      );
-
-      await delay(delayMs);
-      return withRetry(operation, context, attempt + 1);
-    }
-
-    throw error;
-  }
-}
-
 // Tool handlers
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    SCRAPE_TOOL,
-    MAP_TOOL,
-    CRAWL_TOOL,
-    CHECK_CRAWL_STATUS_TOOL,
-    BATCH_SCRAPE_TOOL,
-    CHECK_BATCH_STATUS_TOOL,
-    CRAWL_PARAMS_PREVIEW_TOOL,
-    SEARCH_TOOL,
-    EXTRACT_TOOL,
-    DEEP_RESEARCH_TOOL,
-    GENERATE_LLMSTXT_TOOL,
-  ],
+  tools: buildToolList(),
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -1370,19 +1280,7 @@ async function runStreamableHttpServer() {
   const firecrawlTools = new FirecrawlToolsIntegration();
   
   // Create standardized MCP server with tool integration
-  const mcpHttpServer = new MCPStreamableHTTPServer(server, [
-    SCRAPE_TOOL,
-    MAP_TOOL,
-    CRAWL_TOOL,
-    CHECK_CRAWL_STATUS_TOOL,
-    BATCH_SCRAPE_TOOL,
-    CHECK_BATCH_STATUS_TOOL,
-    CRAWL_PARAMS_PREVIEW_TOOL,
-    SEARCH_TOOL,
-    EXTRACT_TOOL,
-    DEEP_RESEARCH_TOOL,
-    GENERATE_LLMSTXT_TOOL,
-  ]);
+  const mcpHttpServer = new MCPStreamableHTTPServer(server, buildToolList());
   
   // Set the tool executor to use Firecrawl integration
   mcpHttpServer.setToolExecutor(async (toolName: string, args: any) => {
@@ -1417,50 +1315,6 @@ async function runLocalServer() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.log('MCP Server running on stdio transport');
-}
-
-// Helper functions for security and validation
-function isValidOrigin(origin: string): boolean {
-  // For development, allow all localhost origins
-  if (origin.startsWith('http://localhost:') || origin.startsWith('https://localhost:')) {
-    return true;
-  }
-  
-  // Allow 127.0.0.1 origins for local development
-  if (origin.startsWith('http://127.0.0.1:') || origin.startsWith('https://127.0.0.1:')) {
-    return true;
-  }
-  
-  // Allow file:// protocol for local file access
-  if (origin.startsWith('file://')) {
-    return true;
-  }
-  
-  // Allow null origin for direct requests (like curl, Postman)
-  if (!origin || origin === 'null') {
-    return true;
-  }
-  
-  // For production, check allowed origins from environment
-  const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || [];
-  if (allowedOrigins.length > 0) {
-    return allowedOrigins.includes(origin);
-  }
-  
-  // If no specific origins configured, allow all for development
-  console.log('No ALLOWED_ORIGINS configured, allowing origin:', origin);
-  return true;
-}
-
-function isValidProtocolVersion(version: string): boolean {
-  // Support current and future protocol versions with backward compatibility
-  const supportedVersions = [
-    '2025-06-18',  // Latest specification
-    '2025-03-26',  // Streamable HTTP transport specification
-    '2024-11-05',  // Previous stable version
-    '2024-10-07'   // Legacy support
-  ];
-  return supportedVersions.includes(version);
 }
 
 if (STREAMABLE_HTTP) {

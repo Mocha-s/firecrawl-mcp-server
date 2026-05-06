@@ -31,8 +31,6 @@ import crypto from 'crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
   Tool,
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 
 // MCP Protocol Constants - Backward Compatible
@@ -401,7 +399,7 @@ export class MCPStreamableHTTPServer {
         },
         serverInfo: {
           name: 'firecrawl-mcp',
-          version: '1.12.0'
+          version: '1.13.0'
         }
       }
     };

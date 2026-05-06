@@ -51,7 +51,7 @@ The project implements a Model Context Protocol (MCP) server with multiple trans
 
 **Main Entry Point (`src/index.ts`)**
 - Unified server initialization handling three transport modes
-- Tool definitions and request handlers for 8 Firecrawl tools
+- Tool definitions and request handlers for 12 Firecrawl tools (11 by default + `firecrawl_parse` registered only when `FIRECRAWL_API_URL` is set and `CLOUD_SERVICE` is not `true`)
 - Comprehensive retry logic with exponential backoff
 - Credit usage monitoring and rate limit handling
 
@@ -77,12 +77,13 @@ The server supports three transport mechanisms through a unified interface:
 Transport selection is environment-driven, allowing the same codebase to serve different client requirements.
 
 ### Tool Architecture Pattern
-Each of the 8 Firecrawl tools follows a consistent pattern:
+Each Firecrawl tool follows a consistent pattern:
 
-1. **Type Guards**: Validate input parameters using TypeScript type guards
-2. **Retry Logic**: Wrap operations in `withRetry()` for resilience  
-3. **Response Formatting**: Standardized success/error response structure
-4. **Logging**: Comprehensive operation tracking and performance metrics
+1. **Zod Schema Validation**: Each tool's args are validated with a zod schema in `src/firecrawl-tools-integration.ts` (`scrapeParamsSchema`, `mapParamsSchema`, …, `parseParamsSchema`)
+2. **Param Transforms**: `transformScrapeParams` expands string `formats: ['json']` + sibling `jsonOptions` / `screenshotOptions` / `pdfOptions` into the v2 SDK object form
+3. **Retry Logic**: Wrap operations in `withRetry()` for resilience
+4. **Routing**: `firecrawl-js` v4 default surface for v2 endpoints; `client.v1.*` for `deepResearch` / `generateLLMsText`; raw `fetch()` for `crawl/params-preview` (not exposed by SDK)
+5. **Logging**: Comprehensive operation tracking and performance metrics
 
 ### Error Handling Strategy
 Multi-layered error handling approach:
